@@ -1,176 +1,118 @@
-require('dotenv').config();
+// index.js
+require('dotenv').config({ quiet: true });
 const express = require('express');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const mysql = require('mysql2/promise');
 const cors = require('cors');
-const { swaggerUi, specs } = require("./swagger");
 
 const app = express();
-
-// ================== Middleware ==================
-app.use(cors());
 app.use(express.json());
+app.use(cors());
 
-// Swagger
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(specs));
-
-// ================== Database Config ==================
-const dbConfig = {
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT) || 3306,
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASS || '',
-  database: process.env.DB_NAME || 'db_68319010061',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-};
-
-// JWT Secret
-const JWT_SECRET = process.env.JWT_SECRET || 'SECRET_KEY';
-
-// Create Pool
-const pool = mysql.createPool(dbConfig);
-
-// Test DB
-pool.getConnection()
-  .then(conn => {
-    console.log('✅ Database connected:', dbConfig.database);
-    conn.release();
-  })
-  .catch(err => {
-    console.error('❌ DB Error:', err.message);
-  });
-
-// ================== Auth Middleware ==================
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ success: false, message: 'ไม่มี Token' });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(401).json({ success: false, message: 'Token ไม่ถูกต้อง' });
+// ==================== Root Route ====================
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: 'Backend API Server is running',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    documentation: '/api-docs',
+    endpoints: {
+      users: '/api/users',
+      auth: '/api/auth',
+      menus: '/api/menus',
+      health: '/health'
     }
-    req.user = user;
-    next();
   });
-};
+});
 
-// ================== Register ==================
-/**
- * @swagger
- * /auth/register:
- *   post:
- *     summary: สมัครสมาชิก
- *     tags: [Auth]
- */
-app.post('/auth/register', async (req, res) => {
-  const { username, password, email } = req.body;
-
-  if (!username || !password || !email) {
-    return res.status(400).json({ success: false, message: 'กรอกข้อมูลไม่ครบ' });
-  }
-
+// ==================== Health Check ====================
+app.get('/health', async (req, res) => {
   try {
-    const [exists] = await pool.query(
-      'SELECT * FROM tbl_customers WHERE username = ?',
-      [username]
-    );
-
-    if (exists.length > 0) {
-      return res.status(400).json({ success: false, message: 'Username ซ้ำ' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const [result] = await pool.query(
-      `INSERT INTO tbl_customers (username, password, email)
-       VALUES (?, ?, ?)`,
-      [username, hashedPassword, email]
-    );
-
-    const token = jwt.sign(
-      { customer_id: result.insertId, username },
-      JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'ลงทะเบียนสำเร็จ',
-      token
+    const db = require('./config/db');
+    const [result] = await db.query('SELECT 1 as test');
+    
+    res.json({
+      status: 'OK',
+      database: 'connected',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString()
     });
-
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      database: 'disconnected',
+      error: error.message,
+      uptime: process.uptime()
+    });
   }
 });
 
-// ================== Login ==================
-/**
- * @swagger
- * /auth/login:
- *   post:
- *     summary: เข้าสู่ระบบ
- *     tags: [Auth]
- */
-app.post('/auth/login', async (req, res) => {
-  const { username, password } = req.body;
+// ==================== Routes ====================
+try {
+  app.use("/api/users", require("./routes/users"));
+  console.log('✅ Users routes loaded');
+} catch (error) {
+  console.error('❌ Users routes error:', error.message);
+}
 
-  if (!username || !password) {
-    return res.status(400).json({ success: false, message: 'ข้อมูลไม่ครบ' });
-  }
+try {
+  app.use("/api/menus", require("./routes/menus"));
+  console.log('✅ Menus routes loaded');
+} catch (error) {
+  console.error('❌ Menus routes error:', error.message);
+}
 
-  try {
-    const [users] = await pool.query(
-      'SELECT * FROM tbl_customers WHERE username = ?',
-      [username]
-    );
+try {
+  app.use("/api/auth", require("./routes/login"));
+  console.log('✅ Auth routes loaded');
+} catch (error) {
+  console.error('❌ Auth routes error:', error.message);
+}
 
-    if (users.length === 0) {
-      return res.status(401).json({ success: false, message: 'ข้อมูลไม่ถูกต้อง' });
-    }
+// ==================== Swagger Documentation ====================
+try {
+  const { swaggerUi, specs } = require("./swagger");
+  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(specs));
+  console.log('✅ Swagger loaded');
+} catch (error) {
+  console.error('❌ Swagger error:', error.message);
+  app.get("/api-docs", (req, res) => {
+    res.json({
+      error: 'API Documentation not available',
+      message: error.message
+    });
+  });
+}
 
-    const user = users[0];
-    const match = await bcrypt.compare(password, user.password);
-
-    if (!match) {
-      return res.status(401).json({ success: false, message: 'ข้อมูลไม่ถูกต้อง' });
-    }
-
-    const token = jwt.sign(
-      { customer_id: user.customer_id, username: user.username },
-      JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-
-    res.json({ success: true, token });
-
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+// ==================== 404 Handler ====================
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Route not found',
+    path: req.path,
+    method: req.method
+  });
 });
 
-// ================== Customers (Protected) ==================
-app.get('/customers', authenticateToken, async (req, res) => {
-  try {
-    const [rows] = await pool.query(
-      'SELECT customer_id, username, email FROM tbl_customers'
-    );
-    res.json({ success: true, data: rows });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+// ==================== Global Error Handler ====================
+app.use((err, req, res, next) => {
+  console.error('❌ Global Error:', err);
+  res.status(err.status || 500).json({
+    success: false,
+    message: 'Internal server error',
+    error: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong'
+  });
 });
 
-// ================== Start Server ==================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running at http://localhost:${PORT}`);
-  console.log(`📘 Swagger Docs: http://localhost:${PORT}/api-docs`);
-});
+
+// Only listen if not in production (Vercel handles this)
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
+    console.log(`📚 API Documentation available at http://localhost:${PORT}/api-docs`);
+  });
+}
+
+// ==================== Export for Vercel ====================
+module.exports = app;
